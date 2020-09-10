@@ -1,0 +1,476 @@
+---
+title: "EDA_2"
+author: "Laura Wang"
+date: "4/5/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE)
+pacman::p_load(
+magrittr,
+knitr,
+sqldf,
+lme4,
+readxl,
+lubridate,"grid","gridExtra","scales",
+tidyverse
+)
+```
+
+Data Cleaning
+-------------
+
+### Read data
+```{r}
+# master <-read.delim("clipboard")
+
+master <- read_xlsx("/Users/laura/OneDrive - Boston University/For Masanao Class - ROMS Full Data Set - March 19th, 2019 Upload.xlsx",sheet = 1)
+
+claim <- read_xlsx("/Users/laura/OneDrive - Boston University/For Masanao Class - ROMS Full Data Set - March 19th, 2019 Upload.xlsx",sheet = 2)
+
+# names(master)
+check <- apply(master, 2, function(x) any(is.na(x)))
+
+```
+
+### clean colnames
+```{r}
+m1 <- as_tibble(master)
+names(m1)<-str_replace_all(names(m1), c(" " = "_"))
+
+
+colnames(m1)[7] <- "Sex"
+colnames(m1)[11] <- "Outcome_index"
+colnames(m1)[which(colnames(m1)=='Outcome_Minimal_Clinical_Important_Difference')] <- "Outcome_Mini"
+colnames(m1)[which(colnames(m1)=='Chronic_Pain_(Yes/No)')]<-"Chronic_Pain"
+colnames(m1)[which(colnames(m1)=='Length_Of_Stay_(days)')]<-"Length_Of_Stay"
+
+
+## Injury_Date change to date
+m1$Injury_Date[m1$Injury_Date=="5"] <-"NULL"
+m1$Injury_Date <- as.numeric(m1$Injury_Date)
+m1$Injury_Date <- as.Date(m1$Injury_Date, origin = "1899-12-30")
+
+## Surgery_Date change to date
+#str_detect(m1$Surgery_Date[1:10],"^0000-")
+
+m1$Surgery_Date[which(m1$Surgery_Date=="Null")] <- "NULL"
+m1$Surgery_Date[str_detect(m1$Surgery_Date,"^0000-")] <- "NULL"
+m1$Surgery_Date <- as.numeric(m1$Surgery_Date)
+m1$Surgery_Date <- as.Date(m1$Surgery_Date, origin = "1899-12-30")
+
+## change Outcome mini score to numeric so that can compare
+m1$Outcome_Mini <- as.numeric(m1$Outcome_Mini)
+
+#which(colnames(m1)=='Sex_(1=male,_2=female)')
+```
+
+### Identify outcome 1/0 success or not on each vist and discharge base
+```{r}
+m1 %<>% mutate(Vis_Chg_Scr = ifelse(Outcome_index=="Bad", -1*(Visit_Outcome_Score - Admission_Outcome_Score),(Visit_Outcome_Score-Admission_Outcome_Score)))
+
+m1 %<>% mutate(Vis_Chg_Scr = ifelse(Outcome_index=="Bad", -1*(Visit_Outcome_Score - Admission_Outcome_Score),(Visit_Outcome_Score-Admission_Outcome_Score)))
+
+m1 %<>% mutate(Fin_Chg_Scr = ifelse(Outcome_index=="Bad",-1*(Outcome_Change_Scores),Outcome_Change_Scores))
+
+m1 %<>% mutate(Vis_Suc = ifelse(Vis_Chg_Scr>=Outcome_Mini,1,0))
+m1 %<>% mutate(Fin_Suc = ifelse(Fin_Chg_Scr>=Outcome_Mini,1,0))
+
+
+
+```
+
+### remove NA and abnormal values, convert text to upper case to category, remove duplicated values
+
+```{r}
+na.check <- function(x){
+
+   na_count <-sapply(x, function(y) sum(length(which(is.na(y)))))
+   na_count_df <- data.frame(na_count,col.n=seq(1:length(na_count)))
+    return(View(na_count_df))
+}
+# na.check(m1)
+## change the ROMS_ID 3957 one age value -967 ...-.-
+m1$Age[!is.na(m1$Age) & (m1$Age<0)] <- m1$Age[which(!is.na(m1$Age) & (m1$Age<0))-1]
+
+## tolower Outcome
+m1 %<>% mutate(Outcome = toupper(Outcome))
+m1 %<>% mutate(Age=round(Age))
+m1 %<>% mutate(Body_Region=toupper(Body_Region))
+m1 %<>% mutate(Start_Risk = toupper(Start_Risk))
+m1 %<>% mutate(Chronic_Pain = toupper(Chronic_Pain))
+m1$Chronic_Pain[m1$Chronic_Pain==1] <- "YES"
+m1$Sex[m1$Sex==1]<- "MALE"
+m1$Sex[m1$Sex==2]<- "FEMALE"
+
+## remove duplicated m1
+m1 <- m1 %>% distinct()
+
+## m2 -- visit info
+
+## m3 -- discharge info
+#m3 <- m1 %>% select(ROMS_ID,Payer_Category,Age,Sex,Outcome,Outcome_Mini,Outcome_index,Body_Region,
+                    #Surgical,Classification,Admission_Outcome_Score,Visits,Length_Of_Stay,Chronic_Pain,Start_Risk,Fin_Chg_Scr,F#in_Suc) %>% distinct()
+
+m3 <- m1 %>% select(-Clinic,-Visit_ID,-Outcome_Score_Range,-Pain_Minimal_Clinical_Important_Difference,-Pain_Score_Range,
+                    -"Pain_-_Is_high_score_good_or_bad?",-Visit_Date,-Visit_Outcome_Score,-Discharge_Outcome_Score,-Discharge_Pain_Score,-Discharge_Date,
+                    -Visit_Pain_Score,-Pain_Change_Scores,-Start_Back_Total,-Start_Back_Subscore,-Vis_Chg_Scr,-Vis_Suc) %>% distinct()
+
+## Seperate Surgical and Conservative
+m3.s <- m3 %>% filter(Surgical=="Surgical") 
+m3.c <- m3 %>% filter(Surgical=="Conservative") %>% select(-Surgery_Date) # --> focus
+
+m3.c$Admission_Date <- as.Date(m3.c$Admission_Date)
+m3.c$Injury_Date <- as.Date(m3.c$Injury_Date)
+
+m3.c <- m3.c %>% mutate(week_dif = round(as.numeric(difftime(Admission_Date,Injury_Date,units = "weeks"))))
+m3.c <- m3.c[-which( is.na(m3.c$week_dif) | (!is.na(m3.c$week_dif) & m3.c$week_dif<0)),]
+
+quantile(m3.c$week_dif)
+#      0%      25%      50%      75%     100% 
+#   0.000    3.900   12.900   48.675 1252.300 
+
+m3.c <- m3.c %>% mutate(vist_dif = ifelse(week_dif<=4,"<=4",
+                                     ifelse(week_dif<=13,"5-13",
+                                     ifelse(week_dif<=49,"14-49",">49"))))
+```
+
+## Random Forest use m3 matrix
+```{r}
+## Random Forest 
+
+rf_df <- m3.c %>% select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Injury_Date",-"Fin_Chg_Scr",-"week_dif",-"Outcome_Change_Scores") %>% na.omit()%>% mutate_if(is.character, as.factor)
+
+rf_df$Fin_Suc <- as.factor(rf_df$Fin_Suc)
+
+sapply(rf_df, class)
+
+library(randomForest)
+set.seed(2009)
+
+train=sample(1:nrow(rf_df),round(nrow(rf_df)*0.8))
+df_train = rf_df[train,]
+df_test =  rf_df[-train,]
+
+dim(df_train)
+dim(df_test)
+
+
+rf_fit1 = randomForest(Fin_Suc~.,data=df_train,importance=T)
+
+rf_fit1
+
+importance(rf_fit1)
+
+```
+
+## New matrix take unique ROMS_ID as each observations
+```{r}
+## join claim to use Therapist
+names(claim)<-str_replace_all(names(claim), c(" " = "_"))
+
+join = "select m1.*, claim.Therapist from m1 left join claim on m1.Visit_ID=claim.Visit_ID"
+
+m4 <- sqldf(join)
+
+m4 <- m4 %>%  distinct()
+
+m4 <- m4 %>% arrange(ROMS_ID, Visit_Date)
+
+m4 <- m4 %>% filter(!is.na(Visit_ID))
+
+m4 <- m4 %>% group_by(ROMS_ID) %>% mutate(id = row_number()) %>% ungroup()
+
+m5 <- m4 %>% filter(id==1) #3346
+
+
+m5 <- m5 %>% select(-Clinic,-Visit_ID,-Outcome_Score_Range,-Pain_Minimal_Clinical_Important_Difference,-Pain_Score_Range,
+                    -"Pain_-_Is_high_score_good_or_bad?",-Visit_Date,-Visit_Outcome_Score,-Discharge_Outcome_Score,-Discharge_Pain_Score,-Discharge_Date,
+                    -Visit_Pain_Score,-Pain_Change_Scores,-Start_Back_Total,-Start_Back_Subscore,-Vis_Chg_Scr,-Vis_Suc) %>% distinct()
+
+## Seperate Surgical and Conservative
+m5.s <- m5 %>% filter(Surgical=="Surgical") 
+m5.c <- m5 %>% filter(Surgical=="Conservative") %>% select(-Surgery_Date) # --> focus
+
+m5.c$Admission_Date <- as.Date(m5.c$Admission_Date)
+m5.c$Injury_Date <- as.Date(m5.c$Injury_Date)
+
+m5.c<- m5.c %>% mutate(week_dif = round(as.numeric(difftime(Admission_Date,Injury_Date,units = "weeks"))))
+m5.c <- m5.c[-which( is.na(m5.c$week_dif) | (!is.na(m5.c$week_dif) & m5.c$week_dif<0)),]
+
+quantile(m5.c$week_dif)
+#   0%  25%  50%  75% 100% 
+#   0    4   11   40 1252 
+
+m5.c <- m5.c %>% mutate(vist_dif = ifelse(week_dif<=4,"<=4",
+                                     ifelse(week_dif<=11,"5-11",
+                                     ifelse(week_dif<=40,"12-40",">40"))))
+
+```
+
+
+## Random Forest with therapist 
+```{r}
+rf_df_2 <- m5.c %>% select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Injury_Date",-"Fin_Chg_Scr",-"vist_dif",-"Outcome_Change_Scores",-"id") %>% na.omit()%>% mutate_if(is.character, as.factor)
+
+rf_df_2 $Fin_Suc <- as.factor(rf_df_2 $Fin_Suc)
+
+sapply(rf_df_2, class)
+
+#library(randomForest)
+set.seed(2009)
+
+train_2=sample(1:nrow(rf_df_2),round(nrow(rf_df_2)*0.80))
+df2_train = rf_df_2[train_2,]
+df2_test =  rf_df_2[-train_2,]
+
+dim(df2_train)
+dim(df2_test)
+
+rf_fit2 = randomForest(Fin_Suc~.,data=df2_train,importance=T)
+
+rf_fit2 
+
+importance(rf_fit2)
+
+
+## predict
+fitted.results.rf <- predict(rf_fit2,newdata=df2_test)
+
+misClasificError <- mean(fitted.results.rf != df2_test$Fin_Suc)
+print(paste('Accuracy',1-misClasificError))
+
+```
+
+## Random Forest without therapist
+```{r}
+rf_df_3 <- m5.c %>% select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Injury_Date",-"Fin_Chg_Scr",-"vist_dif",-"Outcome_Change_Scores",-"id",-"Therapist") %>% na.omit()%>% mutate_if(is.character, as.factor)
+
+rf_df_3 $Fin_Suc <- as.factor(rf_df_3 $Fin_Suc)
+
+sapply(rf_df_3, class)
+
+#library(randomForest)
+set.seed(2009)
+
+train_3=sample(1:nrow(rf_df_3),round(nrow(rf_df_3)*0.80))
+df3_train=  rf_df_3 [train_3,]
+df3_test =  rf_df_3 [-train_3,]
+
+dim(df3_train)
+dim(df3_test)
+
+rf_fit3 = randomForest(Fin_Suc~.,data=df3_train,importance=T)
+
+rf_fit3
+
+importance(rf_fit3)
+
+
+## predict
+fitted.results.rf2 <- predict(rf_fit3,newdata=df3_test)
+
+misClasificError <- mean(fitted.results.rf2 != df3_test$Fin_Suc)
+print(paste('Accuracy',1-misClasificError))
+
+```
+
+
+
+## logistic regression
+```{r}
+library(MASS)
+
+logistic_fit1 <- glm(Fin_Suc~.,data=df2_train,family=binomial(link="logit"))
+
+summary(logistic_fit1)
+
+fitted.results <- predict(logistic_fit1,newdata=df2_test,type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+misClasificError <- mean(fitted.results != df2_test$Fin_Suc)
+print(paste('Accuracy',1-misClasificError))
+
+```
+
+
+EDA
+--------
+
+```{r,fig.align = "center"}
+
+m3$Fin_Suc[m3$Fin_Suc==1]<- "S"
+m3$Fin_Suc[m3$Fin_Suc==0]<- "F"
+
+# hist(m1$Age)
+
+p1 <- ggplot(data=m3, aes(x=Age)) + 
+  geom_histogram(aes(color=as.factor(Fin_Suc),fill=as.factor(Fin_Suc)),na.rm = T,bins=30)+ ggtitle('Age and Success treatment')
+
+# ggplot(m1,aes(x=Age)) + geom_bar(aes(color=fin_suc,fill=fin_suc)) + ggtitle('Age')
+
+p2 <- ggplot(data=m3, aes(x=Age)) + 
+  geom_histogram(aes(color=Sex,fill=Sex),na.rm = T,bins=30)+ ggtitle('Age and Sex')
+
+p3 <-  ggplot(data=m3,aes(x=Sex)) + 
+  geom_histogram(aes(y=(..count..)/sum(..count..),color=as.factor(Fin_Suc),fill=as.factor(Fin_Suc)),na.rm = T,stat ='count',binwidth = 0.2) + labs(y = 'prop') +
+ggtitle('Sex and Success treatment')
+```
+
+## outcome
+```{r}
+# ot <- m3 %>% group_by(Outcome)%>% summarize (count= n(),prop=sum(Fin_Suc)/n()) %>% arrange((count))
+# 
+# p4 <- ggplot(m3) + geom_bar(aes(x=Outcome,y=(..count..)/sum(..count..),fill=Fin_Suc),width= 0.5)+
+#     labs(y = "Percent",x="Outcome",fill="Success/Failure")+scale_y_continuous(labels = scales::percent) +
+#     scale_x_discrete(name = " ", limits = ot$Outcome)+
+#     coord_flip() +
+# ggtitle('Outcome and Success Proportion')
+
+
+
+mo <- m3 %>% mutate(Fin_Suc=ifelse(Fin_Suc=="S",1,0))
+
+ot <- mo %>% group_by(Outcome)%>%summarize (count= n(),prop=round(sum(Fin_Suc)/n()*100)) %>%
+  ungroup() %>% 
+  mutate(prop_t=count/4719 )%>%
+  arrange((count))
+
+p4 <- ggplot(mb) + geom_bar(aes(x=Outcome,y=(..count..)/sum(..count..),fill=as.factor(Fin_Suc)),width= 0.5)+
+    labs(y = "Percent",x="Outcome",fill="Succ/Fail",fontface = "bold") +
+    scale_x_discrete(name = " ", limits = ot$Outcome)+
+  scale_y_continuous(labels = scales::percent)+
+   coord_flip() + 
+   geom_text(data=ot, aes(x=Outcome,y=prop_t,label = paste0(prop,"%")), fontface = "bold",colour="white", size=3.2,hjust=1)+
+  theme(axis.text.y = element_text(face="bold"))+
+  scale_fill_discrete(
+                       breaks=c(0, 1),
+                       labels=c("Failure", "Success"))+
+ggtitle('Outcome and Success Proportion')
+
+
+```
+
+
+## body_region
+```{r}
+mb <- m3 %>% mutate(Fin_Suc=ifelse(Fin_Suc=="S",1,0))
+
+br <- mb %>% group_by(Body_Region)%>%summarize (count= n(),prop=round(sum(Fin_Suc)/n()*100)) %>%
+  ungroup() %>% 
+  mutate(prop_t=count/4719 )%>%
+  arrange((count))
+
+p5 <- ggplot(mb) + geom_bar(aes(x=Body_Region,y=(..count..)/sum(..count..),fill=as.factor(Fin_Suc)),width= 0.5)+
+    labs(y = "Percent",x="Body_Region",fill="Succ/Fail",fontface = "bold") +
+    scale_x_discrete(name = " ", limits = br$Body_Region)+
+  scale_y_continuous(labels = scales::percent)+
+   coord_flip() + 
+   geom_text(data=br, aes(x=Body_Region,y=prop_t,label = paste0(prop,"%")), fontface = "bold",colour="white", size=3.2,hjust=1)+
+  theme(axis.text.y = element_text(face="bold"))+
+  scale_fill_discrete(
+                       breaks=c(0, 1),
+                       labels=c("Failure", "Success"))+
+ggtitle('Body_Region and Success Proportion')
+p5
+```
+
+
+
+
+## Body Region and Outcome 
+```{r}
+bo <- m3 %>% group_by(Outcome)%>%summarize (body_region = length(unique(Body_Region)))
+
+with(m3, table(Classification,Body_Region))
+```
+
+## payer_category
+```{r}
+
+pc <- m3 %>% group_by(Payer_Category)%>%summarize (count= n()) %>% arrange((count))
+
+p6 <- ggplot(m3) + geom_bar(aes(x=Payer_Category,y=(..count..)/sum(..count..),fill=Fin_Suc),width= 0.5)+
+    labs(y = "Percent",x="Payer_Category",fill="Success/Failure")+scale_y_continuous(labels = scales::percent) +
+    scale_x_discrete(name = " ", limits = pc$Payer_Category)+
+    coord_flip() +
+ggtitle('Payer_Category and Success Proportion')
+
+```
+
+
+
+## surgical
+```{r}
+ss <- m3 %>% group_by(Surgical)%>%summarize (count= n()) %>% arrange((count))
+
+p7 <- ggplot(m3) + geom_bar(aes(x=Surgical,y=(..count..)/sum(..count..),fill=Fin_Suc),width= 0.5)+
+    labs(y = "Percent",x="Surgical")+scale_y_continuous(labels = scales::percent) +
+    scale_x_discrete(name = " ", limits = ss$Surgical)+
+    coord_flip() +
+ggtitle('Surgical and Success Proportion')
+
+```
+
+```{r}
+kable(table(m3$Fin_Suc),align = "c")
+print("Success proportion : 47.2%")
+
+grid.arrange(p3,p1,p2,nrow=3)
+
+p4
+p5
+p6
+p7
+```
+
+## Vist and Stay days
+```{r}
+p1 <- ggplot(data=m3, aes(x=Visits)) + 
+  geom_histogram(aes(color=Fin_Suc,fill=Fin_Suc),na.rm = T,bins=40)+ ggtitle('Visits and Success treatment')
+
+vt <- m3 %>% group_by(Visits)%>%summarize (count= n()) %>% arrange(desc(count))
+
+# ggplot(m1,aes(x=Age)) + geom_bar(aes(color=fin_suc,fill=fin_suc)) + ggtitle('Age')
+
+
+p2 <-  ggplot(data=m3, aes(x=Length_Of_Stay)) + 
+  geom_histogram(aes(color=Fin_Suc,fill=Fin_Suc),na.rm = T,bins=40)+ ggtitle('Length_Of_Stay(days) and Success treatment')
+
+st <- m3 %>% group_by(Length_Of_Stay)%>%summarize (count= n()) %>% arrange(desc(count))
+
+grid.arrange(p1,p2)
+```
+
+## ROMS_ID check
+```{r}
+romID <- m1 %>% group_by(ROMS_ID)%>% summarize (count= n()) %>% arrange(desc(count))
+visit_279 <- m1[m1$Visit_ID==279,]
+unique(visit_279 $Payer_Category)
+
+table(m1$ROMS_ID)
+
+visit_ID <- claim %>% group_by(`Visit ID`)%>% summarize (count= n()) %>% arrange(desc(count))
+claim_279 <- claim[claim$`Visit ID`==279,]
+unique(visit_279 $Payer_Category)
+
+
+sr <- m1$Outcome_Score_Range
+sr <- as.numeric(str_sub(sr,3))
+vc <- m1$Visit_Outcome_Score
+dc <- m1$Discharge_Outcome_Score
+which(vc >sr |dc >sr)
+
+m1[which(vc >sr |dc >sr),]
+
+wrong <- m1[which(vc >sr |dc >sr),c(1:3,9,10,21,23,25,6,7,8,11,15,17,21,23,25)]
+length(unique(wrong$ROMS_ID))
+# [1] 43
+```
+
+
+
+
+

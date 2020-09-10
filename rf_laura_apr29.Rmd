@@ -1,0 +1,476 @@
+---
+title: "Modeling_Laura"
+author: "Wanning Wang"
+date: "4/15/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE)
+pacman::p_load(
+magrittr,
+knitr,
+sqldf,
+lme4,
+readxl,
+lubridate,"grid","gridExtra","scales",
+tidyverse,
+)
+```
+
+Data Cleaning
+-------------
+
+### Read data
+```{r}
+# master <-read.delim("clipboard")
+
+master <- read_xlsx("/Users/laura/OneDrive - Boston University/For Masanao Class - ROMS Full Data Set - March 19th, 2019 Upload.xlsx",sheet = 1)
+
+claim <- read_xlsx("/Users/laura/OneDrive - Boston University/For Masanao Class - ROMS Full Data Set - March 19th, 2019 Upload.xlsx",sheet = 2)
+
+# names(master)
+check <- apply(master, 2, function(x) any(is.na(x)))
+
+```
+
+### clean colnames
+```{r}
+m1 <- as_tibble(master)
+names(m1)<-str_replace_all(names(m1), c(" " = "_"))
+
+
+colnames(m1)[7] <- "Sex"
+colnames(m1)[11] <- "Outcome_index"
+colnames(m1)[which(colnames(m1)=='Outcome_Minimal_Clinical_Important_Difference')] <- "Outcome_Mini"
+colnames(m1)[which(colnames(m1)=='Chronic_Pain_(Yes/No)')]<-"Chronic_Pain"
+colnames(m1)[which(colnames(m1)=='Length_Of_Stay_(days)')]<-"Length_Of_Stay"
+
+
+## Injury_Date change to date
+m1$Injury_Date[m1$Injury_Date=="5"] <-"NULL"
+m1$Injury_Date <- as.numeric(m1$Injury_Date)
+m1$Injury_Date <- as.Date(m1$Injury_Date, origin = "1899-12-30")
+
+## Surgery_Date change to date
+#str_detect(m1$Surgery_Date[1:10],"^0000-")
+
+m1$Surgery_Date[which(m1$Surgery_Date=="Null")] <- "NULL"
+m1$Surgery_Date[str_detect(m1$Surgery_Date,"^0000-")] <- "NULL"
+m1$Surgery_Date <- as.numeric(m1$Surgery_Date)
+m1$Surgery_Date <- as.Date(m1$Surgery_Date, origin = "1899-12-30")
+
+## change Outcome mini score to numeric so that can compare
+m1$Outcome_Mini <- as.numeric(m1$Outcome_Mini)
+
+#which(colnames(m1)=='Sex_(1=male,_2=female)')
+```
+
+### Identify outcome 1/0 success or not on each vist and discharge base
+```{r}
+m1 %<>% mutate(Vis_Chg_Scr = ifelse(Outcome_index=="Bad", -1*(Visit_Outcome_Score - Admission_Outcome_Score),(Visit_Outcome_Score-Admission_Outcome_Score)))
+
+m1 %<>% mutate(Vis_Chg_Scr = ifelse(Outcome_index=="Bad", -1*(Visit_Outcome_Score - Admission_Outcome_Score),(Visit_Outcome_Score-Admission_Outcome_Score)))
+
+m1 %<>% mutate(Fin_Chg_Scr = ifelse(Outcome_index=="Bad",-1*(Outcome_Change_Scores),Outcome_Change_Scores))
+
+m1 %<>% mutate(Vis_Suc = ifelse(Vis_Chg_Scr>=Outcome_Mini,1,0))
+m1 %<>% mutate(Fin_Suc = ifelse(Fin_Chg_Scr>=Outcome_Mini,1,0))
+
+```
+
+### remove NA and abnormal values, convert text to upper case to category, remove duplicated values
+
+```{r}
+na.check <- function(x){
+
+   na_count <-sapply(x, function(y) sum(length(which(is.na(y)))))
+   na_count_df <- data.frame(na_count,col.n=seq(1:length(na_count)))
+    return(View(na_count_df))
+}
+# na.check(m1)
+## change the ROMS_ID 3957 one age value -967 ...-.-
+m1$Age[!is.na(m1$Age) & (m1$Age<0)] <- m1$Age[which(!is.na(m1$Age) & (m1$Age<0))-1]
+
+## tolower Outcome
+m1 %<>% mutate(Outcome = toupper(Outcome))
+m1 %<>% mutate(Age=round(Age))
+m1 %<>% mutate(Body_Region=toupper(Body_Region))
+m1 %<>% mutate(Start_Risk = toupper(Start_Risk))
+m1 %<>% mutate(Chronic_Pain = toupper(Chronic_Pain))
+m1$Chronic_Pain[m1$Chronic_Pain==1] <- "YES"
+m1$Sex[m1$Sex==1]<- "MALE"
+m1$Sex[m1$Sex==2]<- "FEMALE"
+
+## remove duplicated m1
+m1 <- m1 %>% distinct()
+
+## m2 -- visit info
+
+## m3 -- discharge info
+
+#m3 <- m1 %>% select(ROMS_ID,Payer_Category,Age,Sex,Outcome,Outcome_Mini,Outcome_index,Body_Region,
+                    #Surgical,Classification,Admission_Outcome_Score,Visits,Length_Of_Stay,Chronic_Pain,Start_Risk,Fin_Chg_Scr,F#in_Suc) %>% distinct()
+
+m3 <- m1 %>% dplyr::select(-Clinic,-Visit_ID,-Outcome_Score_Range,-Pain_Minimal_Clinical_Important_Difference,-Pain_Score_Range,
+                    -"Pain_-_Is_high_score_good_or_bad?",-Visit_Date,-Visit_Outcome_Score,-Discharge_Outcome_Score,-Discharge_Pain_Score,-Discharge_Date,
+                    -Visit_Pain_Score,-Pain_Change_Scores,-Start_Back_Total,-Start_Back_Subscore,-Vis_Chg_Scr,-Vis_Suc) %>% distinct()
+
+## Seperate Surgical and Conservative
+m3.s <- m3 %>% filter(Surgical=="Surgical") 
+m3.c <- m3 %>% filter(Surgical=="Conservative") %>% dplyr::select(-Surgery_Date) # --> focus
+
+m3.c$Admission_Date <- as.Date(m3.c$Admission_Date)
+m3.c$Injury_Date <- as.Date(m3.c$Injury_Date)
+
+m3.c <- m3.c %>% mutate(week_dif = round(as.numeric(difftime(Admission_Date,Injury_Date,units = "weeks"))),days_dif = round(as.numeric(difftime(Admission_Date,Injury_Date,units = "days"))))
+
+
+m3.c <- m3.c[-which( is.na(m3.c$week_dif) | (!is.na(m3.c$week_dif) & m3.c$week_dif<0)),]
+
+quantile(m3.c$week_dif)
+#  0%  25%  50%  75% 100% 
+#  0    4   13   49 1252 
+
+m3.c <- m3.c %>% mutate(vist_dif = ifelse(week_dif<=4,"<=4",
+                                     ifelse(week_dif<=13,"5-13",
+                                     ifelse(week_dif<=49,"14-49",">49"))))
+```
+
+## (updated model, delete visit info) Random Forest use m3.c matrix
+```{r}
+## Random Forest 
+
+rf_df <- m3.c %>% dplyr::select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Injury_Date",-"Fin_Chg_Scr",-"week_dif",-"Outcome_Change_Scores",-"Length_Of_Stay",-"Visits") %>% na.omit()%>% mutate_if(is.character, as.factor)
+
+rf_df$Fin_Suc <- as.factor(rf_df$Fin_Suc)
+
+sapply(rf_df, class)
+
+library(randomForest)
+set.seed(2009)
+
+train=sample(1:nrow(rf_df),round(nrow(rf_df)*0.8))
+df_train = rf_df[train,]
+df_test =  rf_df[-train,]
+
+dim(df_train)
+dim(df_test)
+
+
+rf_fit1 = randomForest(Fin_Suc~.,data=df_train,importance=T)
+
+rf_fit1
+
+importance(rf_fit1)
+
+## predict
+fitted.results.rf1 <- predict(rf_fit1,newdata=df_test)
+
+misClasificError <- mean(fitted.results.rf1 != df_test$Fin_Suc)
+print(paste('Accuracy',1-misClasificError))
+varImpPlot (rf_fit1)
+plot(rf_fit1)
+```
+
+## New matrix take unique ROMS_ID as each observations
+```{r}
+## join claim to use Therapist
+names(claim)<-str_replace_all(names(claim), c(" " = "_"))
+
+join = "select m1.*, claim.Therapist from m1 left join claim on m1.Visit_ID=claim.Visit_ID"
+
+m4 <- sqldf(join)
+
+m4 <- m4 %>%  distinct()
+
+m4 <- m4 %>% arrange(ROMS_ID, Visit_Date)
+
+m4 <- m4 %>% filter(!is.na(Visit_ID))
+
+m4 <- m4 %>% group_by(ROMS_ID) %>% mutate(id = row_number()) %>% ungroup()
+
+## only take the first time patient visit in as  observations
+m5 <- m4 %>% filter(id==1) #3346
+
+
+m5 <- m5 %>% dplyr::select(-Clinic,-Visit_ID,-Outcome_Score_Range,-Pain_Minimal_Clinical_Important_Difference,-Pain_Score_Range,
+                    -"Pain_-_Is_high_score_good_or_bad?",-Visit_Date,-Visit_Outcome_Score,-Discharge_Outcome_Score,-Discharge_Pain_Score,-Discharge_Date,
+                    -Visit_Pain_Score,-Pain_Change_Scores,-Start_Back_Total,-Start_Back_Subscore,-Vis_Chg_Scr,-Vis_Suc) %>% distinct()
+
+## Seperate Surgical and Conservative
+m5.s <- m5 %>% filter(Surgical=="Surgical") 
+m5.c <- m5 %>% filter(Surgical=="Conservative") %>% dplyr::select(-Surgery_Date) # --> focus
+
+m5.c$Admission_Date <- as.Date(m5.c$Admission_Date)
+m5.c$Injury_Date <- as.Date(m5.c$Injury_Date)
+
+m5.c<- m5.c %>% mutate(week_dif = round(as.numeric(difftime(Admission_Date,Injury_Date,units = "weeks"))),day_dif = round(as.numeric(difftime(Admission_Date,Injury_Date,units = "days"))))
+m5.c <- m5.c[-which( is.na(m5.c$day_dif) | (!is.na(m5.c$day_dif) & m5.c$day_dif<0)),]
+
+quantile(m5.c$week_dif)
+#   0%  25%  50%  75% 100% 
+#   0    4   11   40 1252 
+
+m5.c <- m5.c %>% mutate(vist_dif = ifelse(week_dif<=4,"<=4",
+                                     ifelse(week_dif<=11,"5-11",
+                                     ifelse(week_dif<=40,"12-40",">40"))))
+
+quantile(m5.c$Admission_Outcome_Score)
+
+```
+
+
+## (updated model, delete visit info) Random Forest with therapist 
+```{r}
+rf_df_2 <- m5.c %>% dplyr::select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Injury_Date",-"Fin_Chg_Scr",-"week_dif",-"Outcome_Change_Scores",-"id",-"Length_Of_Stay",-"Visits") %>% na.omit()%>% mutate_if(is.character, as.factor)
+
+rf_df_2 $Fin_Suc <- as.factor(rf_df_2 $Fin_Suc)
+
+sapply(rf_df_2, class)
+
+#library(randomForest)
+set.seed(2018)
+
+train_2=sample(1:nrow(rf_df_2),round(nrow(rf_df_2)*0.80))
+df2_train = rf_df_2[train_2,]
+df2_test =  rf_df_2[-train_2,]
+
+dim(df2_train)
+dim(df2_test)
+
+rf_fit2 = randomForest(Fin_Suc~.,data=df2_train,importance=T)
+
+rf_fit2 
+
+importance(rf_fit2)
+
+
+## predict
+fitted.results.rf <- predict(rf_fit2,newdata=df2_test)
+
+misClasificError <- mean(fitted.results.rf != df2_test$Fin_Suc)
+print(paste('Accuracy',1-misClasificError))
+varImpPlot (rf_fit2)
+```
+
+##(updated model, delete visit info) Random Forest without therapist [in W4 slide]
+```{r}
+rf_df_3 <- m5.c %>% dplyr::select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Fin_Chg_Scr",-"vist_dif",-"Outcome_Change_Scores",-"id",-"Therapist",-"Length_Of_Stay",-"Visits",-"day_dif") %>% na.omit()%>% mutate_if(is.character, as.factor)
+
+rf_df_3 $Fin_Suc <- as.factor(rf_df_3 $Fin_Suc)
+
+sapply(rf_df_3, class)
+
+#library(randomForest)
+set.seed(678302)
+
+train_3=sample(1:nrow(rf_df_3),round(nrow(rf_df_3)*0.80))
+df3_train=  rf_df_3 [train_3,]
+df3_test =  rf_df_3 [-train_3,]
+
+dim(df3_train)
+dim(df3_test)
+```
+
+
+```{r}
+rf_fit3 = randomForest(Fin_Suc~.,data=df3_train,importance=T,
+nodesize=10,mtry=5,ntree=450)
+
+rf_fit3
+
+importance(rf_fit3)
+
+
+## predict
+fitted.results.rf2 <- predict(rf_fit3,newdata=df3_test)
+
+misClasificError <- mean(fitted.results.rf2 != df3_test$Fin_Suc)
+print(paste('Accuracy',1-misClasificError))
+p <- varImpPlot (rf_fit3)
+
+
+
+var_importance <- data_frame(variable=setdiff(colnames(df3_train), "Fin_Suc"),
+                             importance=as.vector(importance(rf_fit3,type = 2)))
+var_importance <- arrange(var_importance, desc(importance))
+var_importance$variable <- factor(var_importance$variable, levels=var_importance$variable)
+
+p <- ggplot(var_importance, aes(x=variable, weight=importance, fill=variable))
+p <- p + geom_bar() + ggtitle("Variable Importance from Random Forest Fit")
+p <- p + xlab("Predictor") + ylab("Variable Importance (Mean Decrease in Gini Index)")
+p <- p + scale_fill_discrete(name="Predictor Name")
+p + theme(axis.text.x=element_blank(),
+          axis.text.y=element_text(size=12),
+          axis.title=element_text(size=12),
+          plot.title=element_text(size=12,face="bold"),
+          legend.title=element_text(size=12),
+          legend.text=element_text(size=12))
+
+
+
+#plot(rf_fit3)
+```
+
+
+```{r}
+```
+
+
+## (updated model, delete visit info) Random Forest in different outcome categories [in W4 slide]
+```{r}
+rf_df_5 <- m5.c %>% dplyr::select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Injury_Date",-"Fin_Chg_Scr",-"vist_dif",-"Outcome_Change_Scores",-"id",-"Therapist",-"Length_Of_Stay",-"Outcome_index",-"Visits") %>% na.omit()%>% mutate_if(is.character, as.factor)
+
+
+rf_df_5 $Fin_Suc <- as.factor(rf_df_5 $Fin_Suc)
+out.cat <- unique(rf_df_5$Outcome)
+br.cat <- unique(rf_df_5$Body_Region)
+#LOWER EXTREMITY FUNC SCALE 
+
+df.out <- vector("list",length(out.cat))
+out.train <- vector("list",length(out.cat))
+out.test <- vector("list",length(out.cat))
+rf.fit.out.s <- vector("list",length(out.cat))
+fitted.results.rf.out <- vector("list",length(out.cat))
+
+accuracy <- rep(NA,length(out.cat))
+
+j = 1
+for (i in out.cat){
+  set.seed(2018)
+  df.out[[j]]=rf_df_5 %>% filter(Outcome==i)
+  train.out=sample(1:nrow(df.out[[j]]),round(nrow(df.out[[j]])*0.80))
+  out.train1 = df.out[[j]]
+  out.train = out.train1[train.out,]
+  out.test1 = df.out[[j]]
+  out.test =out.test1[-train.out,]
+  rf.fit.out = randomForest(Fin_Suc~.,data= out.train,importance=T)
+  rf.fit.out.s[[j]]=rf.fit.out
+  fitted.results.rf.out <- predict(rf.fit.out,newdata=out.test)
+  misClasificError <- mean(fitted.results.rf.out!=out.test$Fin_Suc)
+  #print(paste(i,'Accuracy',1-misClasificError))
+  accuracy[j]= paste(i,'Accuracy',1-misClasificError)
+  j = j+1
+}
+
+accuracy
+rf.fit.out.s
+```
+
+```{r}
+rf_df_5 %>% group_by(Outcome) %>% summarize(cases=n()) %>% arrange(desc(cases))
+```
+
+
+```{r}
+accuracy2 <- rep(NA,length(br.cat))
+
+j = 1
+for (i in br.cat){
+  set.seed(2019)
+  df.out[[j]]=rf_df_5 %>% filter(Body_Region==i)
+  train.out=sample(1:nrow(df.out[[j]]),round(nrow(df.out[[j]])*0.80))
+  out.train1 = df.out[[j]]
+  out.train = out.train1[train.out,]
+  out.test1 = df.out[[j]]
+  out.test =out.test1[-train.out,]
+  rf.fit.out = randomForest(Fin_Suc~.,data= out.train,importance=T)
+  rf.fit.out.s[[j]]=rf.fit.out
+  fitted.results.rf.out <- predict(rf.fit.out,newdata=out.test)
+  misClasificError <- mean(fitted.results.rf.out!=out.test$Fin_Suc)
+  print(paste(i,'Accuracy',1-misClasificError))
+  accuracy2[j]= paste(i,'Accuracy',1-misClasificError)
+  j = j+1
+}
+
+accuracy2
+
+rf.fit.out.s
+
+
+rf.fit.out.s
+```
+
+
+
+
+
+## logistic regression use m5.c matrix
+```{r}
+library(MASS)
+
+logistic_fit1 <- glm(Fin_Suc~.,data=df2_train,family=binomial(link="logit"))
+
+summary(logistic_fit1)
+
+fitted.results.l1 <- predict(logistic_fit1,newdata=df2_test,type='response')
+fitted.results.l1 <- ifelse(fitted.results.l1 > 0.5,1,0)
+misClasificError <- mean(fitted.results.l1 != df2_test$Fin_Suc)
+print(paste('Accuracy',1-misClasificError))
+
+```
+
+
+## prepare data for treeshap
+```{r}
+rf_df_3 <- m5.c %>% dplyr::select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Injury_Date",-"Fin_Chg_Scr",-"vist_dif",-"Outcome_Change_Scores",-"id",-"Therapist",-"Length_Of_Stay",-"Visits",-"Outcome_index") %>% na.omit()%>% mutate_if(is.character, as.factor)
+
+rf_df_3 $Fin_Suc <- as.factor(rf_df_3 $Fin_Suc)
+
+
+## data with week_dif
+rf.df1 <- m5.c %>% dplyr::select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Fin_Chg_Scr",-"Outcome_Change_Scores",-"id",-"Length_Of_Stay",-"Visits",-"Therapist") %>% na.omit()%>% mutate_if(is.character, as.factor)
+rf.df1 $Fin_Suc <- as.factor(rf.df1 $Fin_Suc)
+
+## data with vist_dif
+rf.df2 <- m5.c %>% dplyr::select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Fin_Chg_Scr",-"week_dif",-"Outcome_Change_Scores",-"id",-"Therapist",-"Length_Of_Stay",-"Visits") %>% na.omit()%>% mutate_if(is.character, as.factor)
+rf.df2 $Fin_Suc <- as.factor(rf.df2 $Fin_Suc)
+
+
+## data with vist_dif
+rf.df2 <- m5.c %>% dplyr::select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Fin_Chg_Scr",-"week_dif",-"Outcome_Change_Scores",-"id",-"Therapist",-"Length_Of_Stay",-"Visits") %>% na.omit()%>% mutate_if(is.character, as.factor)
+rf.df2 $Fin_Suc <- as.factor(rf.df2 $Fin_Suc)
+
+## write out data
+write.csv(rf.df1,"/Users/laura/OneDrive - Boston University/rf1.csv",row.names=FALSE)
+write.csv(rf.df2,"/Users/laura/OneDrive - Boston University/rf2.csv",row.names=FALSE)
+write.csv(rf.df3,"/Users/laura/OneDrive - Boston University/rf2.csv",row.names=FALSE)
+
+
+ggplot(rf.df1) + geom_bar(aes(x=Start_Risk,fill=Fin_Suc)) #+ facet_wrap(~Outcome)
+
+
+```
+
+
+## logistic
+```{r}
+lg_df <- m5.c %>% dplyr::select(-"ROMS_ID",-"Payer",-"Outcome_Mini",-"Surgical",-"Classification",-"Admission_Date",-"Injury_Date",-"Injury_Date",-"Fin_Chg_Scr",-"vist_dif",-"Outcome_Change_Scores",-"id",-"Therapist",-"Length_Of_Stay",-"Visits",-"day_dif",-'Payer_Category') %>% na.omit()%>% mutate_if(is.character, as.factor)
+
+lg_df $Fin_Suc <- as.factor(lg_df $Fin_Suc)
+
+sapply(lg_df, class)
+
+#library(randomForest)
+set.seed(678302)
+
+lg=sample(1:nrow(lg_df),round(nrow(lg_df)*0.80))
+lg_train=  lg_df [lg,]
+lg_test =  lg_df [-lg,]
+
+
+library(MASS)
+
+logistic_fit1 <- glm(Fin_Suc~.,data=lg_train,family=binomial(link="logit"))
+
+summary(logistic_fit1)
+
+fitted.results.l1 <- predict(logistic_fit1,newdata=lg_test,type='response')
+fitted.results.l1 <- ifelse(fitted.results.l1 > 0.5,1,0)
+misClasificError <- mean(fitted.results.l1 != lg_test$Fin_Suc)
+print(paste('Accuracy',1-misClasificError))
+```
+
